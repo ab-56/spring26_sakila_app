@@ -1,3 +1,10 @@
+
+"""
+Configuration file for Sakila application.
+Handles database settings and environment variables.
+"""
+
+
 # Name: Abeeha
 # Date: 2026-04-24
 
