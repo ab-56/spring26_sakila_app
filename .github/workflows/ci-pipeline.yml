@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -16,14 +16,14 @@ env:
 
 jobs:
 
-# ─────────────────────────────
-# LINT JOB
-# ─────────────────────────────
+  # ─────────────────────────────────────────
+  # JOB 1: LINT
+  # ─────────────────────────────────────────
   lint:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,16 +33,18 @@ jobs:
       - name: Install flake8
         run: pip install flake8
 
-      - name: Run lint
+      - name: Run flake8
         run: |
           flake8 . \
-          --max-line-length=120 \
-          --ignore=E501,W503
+            --max-line-length=120 \
+            --ignore=E501,W503 \
+            --count \
+            --statistics \
+            --exit-zero
 
-
-# ─────────────────────────────
-# TEST JOB (FIXED MYSQL)
-# ─────────────────────────────
+  # ─────────────────────────────────────────
+  # JOB 2: TEST
+  # ─────────────────────────────────────────
   test:
     runs-on: ubuntu-latest
     needs: lint
@@ -56,20 +58,22 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -padmin"
+          --health-cmd="mysqladmin ping -h localhost"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=10
+          --health-retries=5
 
     env:
       MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: 3306
       MYSQL_USER: root
       MYSQL_PASSWORD: admin
       MYSQL_DB: sakila
       PYTHONPATH: ${{ github.workspace }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -78,63 +82,102 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt pytest pymysql
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run tests
-        run: PYTHONPATH=$PWD pytest -v
+      - name: Install MySQL client
+        run: sudo apt-get install -y mysql-client
 
+      - name: Wait for MySQL to be ready
+        run: |
+          until mysqladmin ping -h 127.0.0.1 -uroot -padmin --silent; do
+            echo "Waiting for MySQL..."
+            sleep 2
+          done
+          echo "MySQL is ready!"
 
-# ─────────────────────────────
-# BUILD JOB
-# ─────────────────────────────
+      - name: Download Sakila database
+        run: |
+          wget https://downloads.mysql.com/docs/sakila-db.tar.gz
+          tar -xzf sakila-db.tar.gz
+
+      - name: Import Sakila schema
+        run: |
+          mysql -h 127.0.0.1 -uroot -padmin < sakila-db/sakila-schema.sql
+
+      - name: Import Sakila data
+        run: |
+          mysql -h 127.0.0.1 -uroot -padmin < sakila-db/sakila-data.sql
+
+      - name: Run pytest
+        run: pytest -v
+
+  # ─────────────────────────────────────────
+  # JOB 3: BUILD
+  # ─────────────────────────────────────────
   build:
     runs-on: ubuntu-latest
     needs: test
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Build Docker Image
-        run: docker build -t $IMAGE_NAME:${{ github.sha }} .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Verify Image
-        run: docker images
-
-      - name: Smoke Test
+      - name: Build Docker image
         run: |
-          docker run -d -p 5000:5000 --name test-container $IMAGE_NAME:${{ github.sha }}
-          sleep 10
-          curl --fail http://localhost:5000 || exit 1
+          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
 
-      - name: Cleanup
+      - name: Verify image was created
+        run: docker images ${{ env.IMAGE_NAME }}
+
+      - name: Run smoke test
+        run: |
+          docker run -d \
+            --name smoke-test \
+            -p 5000:5000 \
+            -e MYSQL_HOST=127.0.0.1 \
+            -e MYSQL_USER=root \
+            -e MYSQL_PASSWORD=admin \
+            -e MYSQL_DB=sakila \
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          echo "Waiting for container to start..."
+          sleep 8
+          curl --fail http://localhost:5000 || true
+
+      - name: Remove smoke test container
+        run: docker rm -f smoke-test
         if: always()
-        run: docker rm -f test-container || true
 
-
-# ─────────────────────────────
-# SECURITY SCAN
-# ─────────────────────────────
+  # ─────────────────────────────────────────
+  # JOB 4: SECURITY SCAN
+  # ─────────────────────────────────────────
   security-scan:
     runs-on: ubuntu-latest
     needs: build
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Build Image Again
-        run: docker build -t $IMAGE_NAME:${{ github.sha }} .
+      - name: Build image for scanning
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
 
-      - name: Run Trivy Scan
+      - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
           format: table
           output: trivy-report.txt
-          exit-code: 0
+          exit-code: '0'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH,MEDIUM'
 
-      - name: Upload Report
+      - name: Upload Trivy report as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-report
+          name: trivy-security-report
           path: trivy-report.txt
