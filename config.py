@@ -1,16 +1,9 @@
 
-"""
-Configuration file for Sakila application.
-Handles database settings and environment variables.
-"""
-
-
-# Name: Abeeha
-# Date: 2026-04-24
-
 import os
 
-MYSQL_HOST = 'sakila-db-server'
-
-CONNECTION_TIMEOUT = int(os.environ.get('CONNECTION_TIMEOUT', '30'))
-HEALTH_CHECK_INTERVAL = int(os.environ.get('HEALTH_CHECK_INTERVAL', '10'))
+class Config:
+    MYSQL_HOST = os.environ.get("MYSQL_HOST", "db")
+    MYSQL_USER = os.environ.get("MYSQL_USER", "root")
+    MYSQL_PASSWORD = os.environ.get("MYSQL_ROOT_PASSWORD", "admin")
+    MYSQL_DB = os.environ.get("MYSQL_DATABASE", "sakila")
+    SECRET_KEY = "dev"
